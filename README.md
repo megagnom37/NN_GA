@@ -1,0 +1,2 @@
+# NN_GA
+diplom
