@@ -1,4 +1,5 @@
 import gc
+import os
 import gym
 import time
 import copy
@@ -12,20 +13,23 @@ from keras import backend as K
 from keras.applications import NASNetMobile
 from list_converter_v2 import Weights
 from keras.utils import plot_model
+import cartpole
 
 import subprocess
 
 from PIL import Image
 
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 #################### DEFINES ####################
 NUM_GENERATION = 1000
 NUM_PARENT_NETWORKS = 4
 CHILDREN_PER_PARENT = 2
-NUM_MUTATION_WEIGHTS = 40
+NUM_MUTATION_WEIGHTS = 100
 MUTATION_FACTOR = np.float32(0.1)
 MAX_REWARD = 500
 RANDOM_SELECTED_NETWORKS = 1
+NEW_GENERATED_RANDOM_NETWORK = 1
 NUM_STARTS_FOR_AVRG = 3
 NUM_PREVIOUS_USING_STATES = 3
 #################################################
@@ -55,12 +59,12 @@ def current_window_img(offset):
 
 def generate_model(input_size):
     model = models.Sequential()
-    model.add(layers.Conv2D(4, (3, 3), activation='relu', input_shape=input_size))#, strides=(4, 4), padding='valid'))
+    model.add(layers.Conv2D(8, (5, 5), activation='relu', input_shape=input_size))#, strides=(4, 4), padding='valid'))
     model.add(layers.MaxPooling2D((2, 2)))
-    model.add(layers.Conv2D(4, (3, 3), activation='relu'))#, strides=(2, 2), padding='valid'))
+    model.add(layers.Conv2D(16, (4, 4), activation='relu'))#, strides=(2, 2), padding='valid'))
     model.add(layers.MaxPooling2D((2, 2)))
-    model.add(layers.Conv2D(4, (3, 3), activation='relu'))#, strides=(2, 2), padding='valid'))
-    model.add(layers.MaxPooling2D((2, 2)))
+    # model.add(layers.Conv2D(32, (3, 3), activation='relu'))#, strides=(2, 2), padding='valid'))
+    # model.add(layers.MaxPooling2D((2, 2)))
     # model.add(layers.Conv2D(32, (3, 3), activation='relu'))#, strides=(2, 2), padding='valid'))
     # model.add(layers.MaxPooling2D((2, 2)))
     # model.add(layers.Conv2D(64, (3, 3), activation='relu'))#, strides=(2, 2), padding='valid'))
@@ -76,7 +80,7 @@ def generate_model(input_size):
     # model.add(layers.Reshape(target_shape=(32, 10*16)))
     # model.add(layers.LSTM(64))
     model.add(layers.Flatten())
-    model.add(layers.Dense(4, activation='relu'))
+    model.add(layers.Dense(16, activation='relu'))
     model.add(layers.Dense(1, activation='sigmoid'))
 
     model.trainable = False
@@ -139,6 +143,8 @@ def crossingover3(model1, model2):
     result = []
 
     for layer_idx in range(len(model1.layers)):
+        if model1.layers[layer_idx].name.startswith('batch_normalization'):
+            continue
         m1_weights = Weights(model1.layers[layer_idx])
         m2_weights = Weights(model2.layers[layer_idx])
         m1_weights_list = m1_weights.get_weights_list()
@@ -177,13 +183,15 @@ def mutation2(weights, num_weights, mutation_value):
             if weights[i] > 1.0:
                 weights[i] = 1.0
 
-@timer
+# @timer
 def generate_child(model1, model2, tesnsor_size, layers_info):
     child_weights = crossingover3(model1, model2)
     mutation2(child_weights, NUM_MUTATION_WEIGHTS, MUTATION_FACTOR)
     child_model = generate_model(tesnsor_size)
     
     for layer_idx in range(len(child_model.layers)):
+        if child_model.layers[layer_idx].name.startswith('batch_normalization'):
+            continue
         weights_mtrx = layers_info[layer_idx].get_weights_mtrx(
                         child_weights[:layers_info[layer_idx].size()])
         child_model.layers[layer_idx].set_weights(weights_mtrx)
@@ -192,19 +200,22 @@ def generate_child(model1, model2, tesnsor_size, layers_info):
     return child_model
 
 
-def selection(num_networks, rewards, num_selected, num_random):
+def selection(num_networks, rewards, num_selected, num_random, num_new_random, tesnsor_size):
     result = []
-    for i in range(num_selected - num_random):
+    for i in range(num_selected - num_random - num_new_random):
         best_network_idx = rewards.index(max(rewards))
         nn = models.load_model('nn' + str(best_network_idx) + '.h5')
         nn.save('nn' + str(i) + '.h5')
         rewards[best_network_idx] = 0
-        # rewards.pop(best_network_idx)
 
     for i in range(num_random):
         random_idx = random.randint(0, num_networks - 1)
         nn = models.load_model('nn' + str(random_idx) + '.h5')
-        nn.save('nn' + str(num_selected + i) + '.h5')
+        nn.save('nn' + str(num_selected - num_random - num_new_random + i) + '.h5')
+
+    for i in range(num_new_random):
+        new_model = generate_model(tesnsor_size)
+        nn.save('nn' + str(num_selected - num_new_random + i) + '.h5')
 
     return result
 
@@ -239,28 +250,10 @@ def main():
     global NUM_MUTATION_WEIGHTS
     global MUTATION_FACTOR
 
-    env = gym.make('CartPole-v1')
-    env.reset()
-    
-    # time.sleep(0.5)
-    
-    gym_img = env.render(mode='rgb_array') #current_window_img(WINDOW_OFFSET)
-    gym_img = rgb2gray(gym_img)
-    gym_img = gym_img[150:350, 200:400]
-    gym_img = resize(gym_img, (25, 25))
-    # exit()
-    gym_img = gym_img.astype('float32') / 255.0
-
-    img_tensor = np.array(gym_img, dtype='float')
-    img_tensor = img_tensor.reshape((img_tensor.shape[0],
-                                     img_tensor.shape[1],
-                                     1))
-
-    for _ in range(NUM_PREVIOUS_USING_STATES):
-        img_tensor = np.append(img_tensor, img_tensor[:,:,0:1], axis=2)
+    env = cartpole.CartPole(img_mode=True, img_size=(25, 25))
 
     for i in range(NUM_PARENT_NETWORKS):
-        nn = generate_model(img_tensor.shape)
+        nn = generate_model(env.tensor_shape)
         nn.save('nn' + str(i) + '.h5')
         K.clear_session()
         gc.collect()
@@ -287,6 +280,7 @@ def main():
             MUTATION_FACTOR = np.float32(float(cfg.readline()))
             print(NUM_PARENT_NETWORKS, CHILDREN_PER_PARENT, NUM_MUTATION_WEIGHTS, MUTATION_FACTOR)
         
+        num_tasks = NUM_PARENT_NETWORKS * CHILDREN_PER_PARENT
         for net_idx in range(NUM_PARENT_NETWORKS):
             for child_idx in range(CHILDREN_PER_PARENT):
                 partner_idx = get_partner_idx(net_idx, NUM_PARENT_NETWORKS)
@@ -294,15 +288,17 @@ def main():
                 nn_parent2 = models.load_model('nn' + str(partner_idx) + '.h5')
                 child_model = generate_child(nn_parent1,
                                              nn_parent2,
-                                             img_tensor.shape,
+                                             env.tensor_shape,
                                              layers_info)
                 safe_idx = NUM_PARENT_NETWORKS + net_idx * CHILDREN_PER_PARENT + child_idx
                 child_model.save('nn' + str(safe_idx) + '.h5')
+                print('Generating: {}%\r'.format(int(float(net_idx * CHILDREN_PER_PARENT + child_idx) / num_tasks * 100)), end='')
                 K.clear_session()
                 gc.collect()
             K.clear_session()
             gc.collect()
                 # nnetworks.append(child_model)
+        print('')
 
         num_networks = NUM_PARENT_NETWORKS + CHILDREN_PER_PARENT * NUM_PARENT_NETWORKS
         
@@ -311,44 +307,17 @@ def main():
             current_nn = models.load_model('nn' + str(network_idx) + '.h5')
             run_results = np.array([])
             for start_id in range(NUM_STARTS_FOR_AVRG):
-                reward = 0
-                env.reset()
-                
-                prev_states = np.zeros((img_tensor.shape[0],
-                                        img_tensor.shape[1],
-                                        img_tensor.shape[2] - 1))
-                # for i in range(img_tensor.shape[2] - 1):
-                #     prev_states[:,:,i:i+1] = img_tensor[:,:,0:1]
+                env.prepare_env()
 
-                while reward < MAX_REWARD:
-                    env.render()
-                    gym_img = env.render(mode='rgb_array') #current_window_img(WINDOW_OFFSET)
-                    gym_img = rgb2gray(gym_img)
-                    gym_img = gym_img[150:350, 200:400]
-                    gym_img = resize(gym_img, (25, 25))
-                    gym_img = gym_img.astype('float32') / 255.0
+                while not env.is_done():
+                    obs = env.get_obs()
 
-                    gym_tensor = np.array(gym_img, dtype='float')
-                    gym_tensor = gym_tensor.reshape((gym_tensor.shape[0],
-                                                    gym_tensor.shape[1],
-                                                    1))
-                    for i in range(NUM_PREVIOUS_USING_STATES):
-                        gym_tensor = np.append(gym_tensor, prev_states[:,:,i:i+1], axis=2)
-
-                    gym_tensor = np.expand_dims(gym_tensor, axis=0)
-
-                    predict = current_nn.predict(gym_tensor)
+                    predict = current_nn.predict(obs)
                     action = 0 if predict[0][0] < 0.5 else 1
-                    _, _, done, _ = env.step(action)
-                    reward += 1
 
-                    if done:
-                        run_results = np.append(run_results, reward)
-                        break
-                    else:
-                        # if reward % 2 == 0:
-                        update_prev_states(prev_states, gym_tensor[:,:,:,0:1])
+                    env.step(action)
 
+                run_results = np.append(run_results, env.get_reward())
             rewards[network_idx] = int(np.mean(run_results))
             if max_reward < max(rewards):
                 max_reward = max(rewards)
@@ -356,6 +325,8 @@ def main():
                     f.writelines(['MAX REWARD COMMON: {}'.format(max_reward)])
                 current_nn.save('best_network.h5')
             print('Network {}: {}'.format(network_idx, rewards[network_idx]))
+            K.clear_session()
+            gc.collect()
         
         print('-'*40)
         print('MAX REWARD CURRENT: {}'.format(max(rewards)))
@@ -365,7 +336,9 @@ def main():
         nnetworks = selection(num_networks,
                               rewards,
                               NUM_PARENT_NETWORKS,
-                              RANDOM_SELECTED_NETWORKS)
+                              RANDOM_SELECTED_NETWORKS,
+                              NEW_GENERATED_RANDOM_NETWORK,
+                              env.tensor_shape)
 
         # for i in range(len(nnetworks)):
         #     nnetworks[i].save('tmp'+str(i) + '.h5')

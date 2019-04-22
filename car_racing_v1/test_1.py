@@ -1,4 +1,6 @@
+
 import gc
+import os
 import gym
 import time
 import copy
@@ -17,16 +19,18 @@ import subprocess
 
 from PIL import Image
 
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 #################### DEFINES ####################
 NUM_GENERATION = 1000
 NUM_PARENT_NETWORKS = 4
-CHILDREN_PER_PARENT = 2
-NUM_MUTATION_WEIGHTS = 40
+CHILDREN_PER_PARENT = 3
+NUM_MUTATION_WEIGHTS = 200
 MUTATION_FACTOR = np.float32(0.1)
-MAX_REWARD = 500
+MAX_REWARD = 5
+MAX_SAMPLES = 1000
 RANDOM_SELECTED_NETWORKS = 1
-NUM_STARTS_FOR_AVRG = 3
+NUM_STARTS_FOR_AVRG = 1
 NUM_PREVIOUS_USING_STATES = 3
 #################################################
 
@@ -38,6 +42,8 @@ def timer(function):
         return res
     return wrap
 
+def clamp(n, minn, maxn):
+    return max(min(maxn, n), minn)
 
 def current_window_img(offset):
     window = win32gui.GetActiveWindow()
@@ -55,11 +61,13 @@ def current_window_img(offset):
 
 def generate_model(input_size):
     model = models.Sequential()
-    model.add(layers.Conv2D(4, (3, 3), activation='relu', input_shape=input_size))#, strides=(4, 4), padding='valid'))
+    model.add(layers.Conv2D(4, (8, 8), activation='relu', input_shape=input_size))#, strides=(4, 4), padding='valid'))
     model.add(layers.MaxPooling2D((2, 2)))
-    model.add(layers.Conv2D(4, (3, 3), activation='relu'))#, strides=(2, 2), padding='valid'))
+    model.add(layers.Conv2D(8, (4, 4), activation='relu'))#, strides=(2, 2), padding='valid'))
     model.add(layers.MaxPooling2D((2, 2)))
-    model.add(layers.Conv2D(4, (3, 3), activation='relu'))#, strides=(2, 2), padding='valid'))
+    model.add(layers.Conv2D(8, (3, 3), activation='relu'))#, strides=(2, 2), padding='valid'))
+    model.add(layers.MaxPooling2D((2, 2)))
+    model.add(layers.Conv2D(16, (3, 3), activation='relu'))#, strides=(2, 2), padding='valid'))
     model.add(layers.MaxPooling2D((2, 2)))
     # model.add(layers.Conv2D(32, (3, 3), activation='relu'))#, strides=(2, 2), padding='valid'))
     # model.add(layers.MaxPooling2D((2, 2)))
@@ -76,8 +84,8 @@ def generate_model(input_size):
     # model.add(layers.Reshape(target_shape=(32, 10*16)))
     # model.add(layers.LSTM(64))
     model.add(layers.Flatten())
-    model.add(layers.Dense(4, activation='relu'))
-    model.add(layers.Dense(1, activation='sigmoid'))
+    model.add(layers.Dense(16, activation='relu'))
+    model.add(layers.Dense(4, activation='sigmoid'))
 
     model.trainable = False
 
@@ -170,12 +178,12 @@ def mutation2(weights, num_weights, mutation_value):
         direction = random.randint(0, 1)
         if direction == 0:
             weights[i] -= mutation_value
-            if weights[i] < -1.0:
-                weights[i] = -1.0
+            # if weights[i] < -1.0:
+            #     weights[i] = -1.0
         else:
             weights[i] += mutation_value
-            if weights[i] > 1.0:
-                weights[i] = 1.0
+            # if weights[i] > 1.0:
+            #     weights[i] = 1.0
 
 @timer
 def generate_child(model1, model2, tesnsor_size, layers_info):
@@ -230,7 +238,7 @@ def resize(img_mtrx, size):
     img = Image.fromarray(np.uint8(img_mtrx))
     # img.save('test1.png')
     img = img.resize((width, height), Image.BICUBIC)
-    # img.save('test2.png')
+    img.save('test2.png')
     return np.array(img)
 
 def main():
@@ -239,16 +247,18 @@ def main():
     global NUM_MUTATION_WEIGHTS
     global MUTATION_FACTOR
 
-    env = gym.make('CartPole-v1')
+    env = gym.make('Ant-v2')
+    exit()
     env.reset()
-    
-    # time.sleep(0.5)
-    
-    gym_img = env.render(mode='rgb_array') #current_window_img(WINDOW_OFFSET)
+
+
+    gym_img = env.render(mode='state_pixels')
     gym_img = rgb2gray(gym_img)
-    gym_img = gym_img[150:350, 200:400]
-    gym_img = resize(gym_img, (25, 25))
-    # exit()
+    gym_img = gym_img[:-12, :]
+    
+    # print(gym_img.shape)
+    gym_img = resize(gym_img, gym_img.shape)
+
     gym_img = gym_img.astype('float32') / 255.0
 
     img_tensor = np.array(gym_img, dtype='float')
@@ -258,7 +268,8 @@ def main():
 
     for _ in range(NUM_PREVIOUS_USING_STATES):
         img_tensor = np.append(img_tensor, img_tensor[:,:,0:1], axis=2)
-
+    
+    print(img_tensor.shape)
     for i in range(NUM_PARENT_NETWORKS):
         nn = generate_model(img_tensor.shape)
         nn.save('nn' + str(i) + '.h5')
@@ -267,9 +278,6 @@ def main():
     
     K.clear_session()
     gc.collect()
-
-    # nnetworks = [generate_model(img_tensor.shape) 
-    #              for i in range(NUM_PARENT_NETWORKS)]
 
     nn = models.load_model('nn0.h5')
 
@@ -302,7 +310,6 @@ def main():
                 gc.collect()
             K.clear_session()
             gc.collect()
-                # nnetworks.append(child_model)
 
         num_networks = NUM_PARENT_NETWORKS + CHILDREN_PER_PARENT * NUM_PARENT_NETWORKS
         
@@ -311,21 +318,21 @@ def main():
             current_nn = models.load_model('nn' + str(network_idx) + '.h5')
             run_results = np.array([])
             for start_id in range(NUM_STARTS_FOR_AVRG):
-                reward = 0
+                reward = MAX_REWARD
+                samples = 0
                 env.reset()
+                for i in range(50): env.step([0, 0, 0]) 
                 
                 prev_states = np.zeros((img_tensor.shape[0],
                                         img_tensor.shape[1],
                                         img_tensor.shape[2] - 1))
-                # for i in range(img_tensor.shape[2] - 1):
-                #     prev_states[:,:,i:i+1] = img_tensor[:,:,0:1]
 
-                while reward < MAX_REWARD:
+                while reward > 0:
+                    # time.sleep(0.01)
                     env.render()
-                    gym_img = env.render(mode='rgb_array') #current_window_img(WINDOW_OFFSET)
+                    gym_img = env.render(mode='state_pixels')
                     gym_img = rgb2gray(gym_img)
-                    gym_img = gym_img[150:350, 200:400]
-                    gym_img = resize(gym_img, (25, 25))
+                    gym_img = gym_img[:-12, :]
                     gym_img = gym_img.astype('float32') / 255.0
 
                     gym_tensor = np.array(gym_img, dtype='float')
@@ -336,27 +343,45 @@ def main():
                         gym_tensor = np.append(gym_tensor, prev_states[:,:,i:i+1], axis=2)
 
                     gym_tensor = np.expand_dims(gym_tensor, axis=0)
-
+                    
+                    action = [0, 0, 0]
                     predict = current_nn.predict(gym_tensor)
-                    action = 0 if predict[0][0] < 0.5 else 1
-                    _, _, done, _ = env.step(action)
-                    reward += 1
-
-                    if done:
-                        run_results = np.append(run_results, reward)
-                        break
+                    action[0] = (predict[0][0] - 0.5) * 2.0
+                    if predict[0][1] > predict[0][2]:
+                        action[1], action[2] = 0.6, 0
                     else:
-                        # if reward % 2 == 0:
-                        update_prev_states(prev_states, gym_tensor[:,:,:,0:1])
+                        action[1], action[2] = 0, 0.6
+                    # action[1] = 0 if predict[0][1] < 0.5 else 0.6
+                    # action[2] = 0 if predict[0][2] < 0.5 else 0.6
+                    # action[0] = (predict[0][0] - 0.5) * 2.0
+                    # action[1] = predict[0][1]
+                    # action[2] = predict[0][2]
+                    # print(action)
+                    _, rew, done, _ = env.step(action)
+                    reward += rew
+                    reward = clamp(reward, -10, MAX_REWARD)
+                    samples += 0.1
 
-            rewards[network_idx] = int(np.mean(run_results))
+                    # print(rew, done, lives)
+                    # if done:
+                    #     # run_results = np.append(run_results, rew)
+                    #     break
+                    # else:
+                    #     # if reward % 2 == 0:
+                    update_prev_states(prev_states, gym_tensor[:,:,:,0:1])
+                run_results = np.append(run_results, samples)
+
+            rewards[network_idx] = float(np.mean(run_results))
             if max_reward < max(rewards):
                 max_reward = max(rewards)
                 with open("max_reward.txt", "w") as f:
                     f.writelines(['MAX REWARD COMMON: {}'.format(max_reward)])
                 current_nn.save('best_network.h5')
             print('Network {}: {}'.format(network_idx, rewards[network_idx]))
-        
+            
+            K.clear_session()
+            gc.collect()
+
         print('-'*40)
         print('MAX REWARD CURRENT: {}'.format(max(rewards)))
         print('MAX REWARD COMMON: {}'.format(max_reward))
